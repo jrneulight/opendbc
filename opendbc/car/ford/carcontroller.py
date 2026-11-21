@@ -40,6 +40,7 @@ class CarController(CarControllerBase):
 
     self.apply_curvature_last = 0
     self.anti_overshoot_curvature_last = 0
+    self.lat_ctl_counter_offset = 0
     self.accel = 0.0
     self.gas = 0.0
     self.brake_request = False
@@ -101,7 +102,15 @@ class CarController(CarControllerBase):
         # https://www.f150gen14.com/forum/threads/introducing-bluepilot-a-ford-specific-fork-for-comma3x-openpilot.24241/#post-457706
         mode = 1 if CC.latActive else 0
         counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
-        can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, 0., 0., -self.apply_curvature_last, 0., counter))
+        ramp_type = 0
+        if self.CP.flags & FordFlags.TRON:
+          # As sent when the 2026 F-150 was first driven: the first message continues the camera's counter,
+          # and the ramp type is 2 while steering
+          if self.frame == 0:
+            self.lat_ctl_counter_offset = CS.lat_ctl_stock_counter + 1
+          counter = (counter + self.lat_ctl_counter_offset) % 0x10
+          ramp_type = 2 if CC.latActive else 0
+        can_sends.append(fordcan.create_lat_ctl2_msg(self.packer, self.CAN, mode, ramp_type, 0., 0., -self.apply_curvature_last, 0., counter))
       else:
         can_sends.append(fordcan.create_lat_ctl_msg(self.packer, self.CAN, CC.latActive, 0., 0., -self.apply_curvature_last, 0.))
 

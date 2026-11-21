@@ -1,6 +1,7 @@
 import random
 import unittest
 
+from opendbc.can import CANPacker, CANParser
 from opendbc.can.dbc import DBC as CANDBC
 from opendbc.car import DT_CTRL, Bus, gen_empty_fingerprint
 from opendbc.car.structs import CarControl, CarParams
@@ -196,7 +197,11 @@ class TestFordTron(unittest.TestCase):
 
   def test_car_controller(self):
     # Same messages as the 2021-23 F-150 with the lane messages zero padded to 16 bytes, except the camera's
-    # ACCDATA_3 and IPMA_Data, which are not replaced. All of it is allowed by safety
+    # ACCDATA_3 and IPMA_Data, which are not replaced. All of it is allowed by safety.
+    # LateralMotionControl2's ramp type, checksum and counter are compared in test_lane_message
+    def mask(msgs):
+      return [(addr, bytes([dat[0] & 0xfc, 0, *dat[2:7], dat[7] & 0xe1, *dat[8:]]) if addr == 0x3d6 else dat, bus) for addr, dat, bus in msgs]
+
     CP = self._get_params(CAR.FORD_F_150_MK14_5, self.CAMERA_16)
     safety = libsafety_py.libsafety
     safety.set_safety_hooks(CP.safetyConfigs[-1].safetyModel.raw, CP.safetyConfigs[-1].safetyParam)
@@ -215,8 +220,8 @@ class TestFordTron(unittest.TestCase):
         CI_canfd.update([])
         _, sendcan = CI.apply(CC, now_nanos)
         _, sendcan_canfd = CI_canfd.apply(CC, now_nanos)
-        assert sendcan == [(addr, dat.ljust(16 if addr in (0x3ca, 0x3d6) else 8, b'\x00'), bus)
-                           for addr, dat, bus in sendcan_canfd if addr not in (0x18a, 0x3d8)]
+        assert mask(sendcan) == mask([(addr, dat.ljust(16 if addr in (0x3ca, 0x3d6) else 8, b'\x00'), bus)
+                                      for addr, dat, bus in sendcan_canfd if addr not in (0x18a, 0x3d8)])
         addrs_sent_canfd.update(addr for addr, _, _ in sendcan_canfd)
 
         safety.set_timer(now_nanos // 1000)
@@ -226,3 +231,34 @@ class TestFordTron(unittest.TestCase):
         now_nanos += int(DT_CTRL * 1e9)
     assert addrs_sent == {0x83, 0x3ca, 0x3d6}
     assert addrs_sent_canfd == addrs_sent | {0x18a, 0x3d8}
+
+  def test_lane_message(self):
+    # As on the 2026 F-150's first drive: LateralMotionControl2 starts on the counter after the camera's last one and
+    # counts up from there, with ramp type 2 while steering. The 2021-23 F-150's is unchanged
+    for platform, camera_fingerprint, first_counter, active_ramp_type in ((CAR.FORD_F_150_MK14_5, self.CAMERA_16, 10, 2),
+                                                                         (CAR.FORD_F_150_MK14, self.CAMERA_8, 0, 0)):
+      CI = CarInterface(self._get_params(platform, camera_fingerprint))
+      CAN = CanBus(CI.CP)
+      packer = CANPacker(DBC[platform][Bus.pt])
+      parser = CANParser(DBC[platform][Bus.pt], [("LateralMotionControl2", 20)], CAN.main)
+
+      # the camera's last message before the first one is sent has counter 9, the two count separately after that
+      camera_counter = 9
+      CI.update([])
+      counters, ramp_types = [], []
+      now_nanos = 0
+      for lat_active in (False, True, False):
+        CC = CarControl(latActive=lat_active).as_reader()
+        for _ in range(100):
+          now_nanos += int(DT_CTRL * 1e9)
+          CI.update([(now_nanos, [packer.make_can_msg("LateralMotionControl2", CAN.camera, {"LatCtlPath_No_Cnt": camera_counter % 16})])])
+          camera_counter += 1
+          _, sendcan = CI.apply(CC, now_nanos)
+          for msg in sendcan:
+            if msg[0] == 0x3d6:
+              assert parser.update([(now_nanos, [msg])]) == {0x3d6}, "checksum or counter not valid"
+              counters.append(parser.vl["LateralMotionControl2"]["LatCtlPath_No_Cnt"])
+              ramp_types.append(parser.vl["LateralMotionControl2"]["LatCtlRampType_D_Rq"])
+
+      assert counters == [(first_counter + i) % 16 for i in range(60)], platform
+      assert ramp_types == [0] * 20 + [active_ramp_type] * 20 + [0] * 20, platform

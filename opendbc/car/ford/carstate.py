@@ -108,6 +108,8 @@ class CarState(CarStateBase):
     # Stock values from IPMA so that we can retain some stock functionality
     self.acc_tja_status_stock_values = cp_cam.vl["ACCDATA_3"]
     self.lkas_status_stock_values = cp_cam.vl["IPMA_Data"]
+    if self.CP.flags & FordFlags.TRON:
+      self.lat_ctl_stock_counter = int(cp_cam.vl["LateralMotionControl2"]["LatCtlPath_No_Cnt"])
 
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
